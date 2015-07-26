@@ -16,7 +16,7 @@ void str_list_free(struct str_list* slist);
 void walk(char* path, struct str_list* excludes, struct str_list* flist);
 void run(char* dir, struct str_list* excludes, struct str_list* commands);
 int check(char* path, struct str_list *excludes);
-char* strip_dot_slash(char* path);
+char* normpath(char* path);
 
 struct str_list {
     int size;
@@ -65,10 +65,6 @@ void str_list_free(struct str_list *slist) {
 }
 
 void walk(char* path, struct str_list* excludes, struct str_list* flist) {
-    if (check(path, excludes) != 0) {
-        return;
-    }
-
     DIR *dirp;
     struct dirent * dent;
     int len;
@@ -92,9 +88,11 @@ void walk(char* path, struct str_list* excludes, struct str_list* flist) {
         }
 
         strncpy(newpath + len, dent->d_name, PATH_MAX - len);
-        p = strip_dot_slash(newpath);
+        p = normpath(newpath);
         if (dent->d_type == DT_DIR) {
-            walk(p, excludes, flist);
+            if (check(p, excludes) == 0) {
+                walk(p, excludes, flist);
+            }
         }
         if (dent->d_type == DT_REG) {
             if (check(p, excludes) == 0) {
@@ -113,7 +111,7 @@ void run(char* dir, struct str_list* excludes, struct str_list* commands) {
     int nev;                    /* number of events */
     int fd;
     flist = str_list_create();
-    walk(".", excludes, flist);
+    walk(dir, excludes, flist);
     struct kevent events[flist->size];
     struct kevent changes[flist->size];
 
@@ -160,7 +158,11 @@ void run(char* dir, struct str_list* excludes, struct str_list* commands) {
     }
 }
 
-char* strip_dot_slash(char* path) {
+char* normpath(char* path) {
+    int len = strlen(path);
+    if (path[len-1] == '/') {
+        path[len-1] = '\0';
+    }
     if (strlen(path) > 2 && path[0] == '.' && path[1] == '/') {
         path = path + 2;
     }
@@ -209,7 +211,7 @@ int main(int argc, char* argv[]) {
                 if (argv[optind][0] == '-') {
                     break;
                 }
-                exclude = strip_dot_slash(argv[optind]);
+                exclude = normpath(argv[optind]);
                 str_list_append(excludes, exclude);
             }
             break;
