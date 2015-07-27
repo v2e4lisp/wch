@@ -256,7 +256,6 @@ int main(int argc, char* argv[]) {
     int cmdsize;
     struct str_node* fnode;
     char* exclude;
-    int err;
     int c;
     static char usage[] = "Usage: %s [-01wW] [-d dir] [-x exclude] command\n\n"
         "Options:\n"
@@ -302,14 +301,9 @@ int main(int argc, char* argv[]) {
             }
             break;
         case '?':
-            err = 1;
-            break;
+            fprintf(stderr, usage, argv[0]);
+            exit(1);
         }
-    }
-
-    if (err) {
-        fprintf(stderr, usage, argv[0]);
-        exit(1);
     }
     if ((optind+1) > argc) {
         fprintf(stderr, usage, argv[0]);
