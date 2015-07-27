@@ -1,6 +1,7 @@
 #include <sys/types.h>
 #include <sys/dir.h>
 #include <sys/event.h>
+// #include <sys/resource.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,14 +10,19 @@
 
 #define PATH_MAX                 1024
 
-struct str_list* str_list_create();
-void str_list_append(struct str_list* slist, const char* p);
-void str_list_free(struct str_list* slist);
+/* TODO:
+ *   * print fd limits
+ *   * add restart option
+ *   * unit test
+ */
 
-void walk(char* path, struct str_list* excludes, struct str_list* flist);
-void run(char* dir, struct str_list* excludes, struct str_list* commands);
-int check(char* path, struct str_list *excludes);
-char* normpath(char* path);
+struct wchopt {
+    int wait;
+    int once;
+    char** cmd;
+    char* dir;
+    struct str_list* excludes;
+};
 
 struct str_list {
     int size;
@@ -28,6 +34,17 @@ struct str_node {
     char *str;
     struct str_node *next;
 };
+
+struct str_list* str_list_create();
+void str_list_append(struct str_list* slist, const char* p);
+void str_list_free(struct str_list* slist);
+
+void run(struct wchopt *opt);
+void walk(char* path, struct str_list* excludes, struct str_list* flist);
+int check(char* path, struct str_list* excludes);
+char* normpath(char* path);
+void onchange(char* file, char** cmd, int wait);
+
 
 struct str_list* str_list_create() {
     struct str_list *slist = malloc(sizeof(struct str_list));
@@ -104,7 +121,13 @@ void walk(char* path, struct str_list* excludes, struct str_list* flist) {
     closedir(dirp);
 }
 
-void run(char* dir, struct str_list* excludes, struct str_list* commands) {
+void run(struct wchopt* opt) {
+    int wait = opt->wait;
+    int once = opt->once;
+    char** cmd = opt->cmd;
+    char* dir = opt->dir;
+    struct str_list* excludes = opt->excludes;
+
     struct str_list* flist;
     struct str_node* fnode;
     int kq;                     /* kqueue */
@@ -125,7 +148,7 @@ void run(char* dir, struct str_list* excludes, struct str_list* commands) {
     // create kevents
     fnode = flist->head;
     for (int i = 0; i < flist->size; i++) {
-        fd = open(fnode->str, O_RDONLY);
+        fd = open(fnode->str, O_RDONLY | O_CLOEXEC);
         if (fd == -1) {
             fprintf(stderr, "failed to open file: %s\n", fnode->str);
             fnode = fnode->next;
@@ -149,13 +172,47 @@ void run(char* dir, struct str_list* excludes, struct str_list* commands) {
             continue;
         }
 
+        if (once) {
+            nev = 1;
+        }
         for (int i = 0; i < nev; i++) {
             if (events[i].fflags & NOTE_WRITE) {
                 char *fname = (char*) events[i].udata;
-                printf("file changed: %s\n", fname);
+                onchange(fname, cmd, wait);
             }
         }
     }
+}
+
+void onchange(char* file, char** cmd, int wait) {
+    /* char* file not in use */
+    int pid;
+    int ppid;
+    int status;                 /* not in use */
+
+    pid = fork();
+    if (pid < 0) {              /* fork error */
+        fprintf(stderr, "failed to fork");
+        return;
+    }
+    if (pid > 0) {              /* parent */
+        waitpid(pid, &status, WUNTRACED);
+        return;
+    }
+    if(wait) {                  /* child */
+        execvp(cmd[0], cmd);
+    }
+
+    ppid = fork();
+    if(ppid < 0) {              /* fork error */
+        fprintf(stderr, "failed to fork in the child process");
+        _exit(1);
+    }
+    if (ppid > 0) {             /* child */
+        _exit(0);
+    }
+
+    execvp(cmd[0], cmd);        /* grandchild */
 }
 
 char* normpath(char* path) {
@@ -189,19 +246,48 @@ int main(int argc, char* argv[]) {
     extern char *optarg;
     extern int optind;
 
-    struct str_list* commands = str_list_create();
-    struct str_list* excludes = str_list_create();
-    struct str_node* fnode;
-    int err;
-    char* dir = ".";
-    int c;
-    char* exclude;
-    static char usage[] = "usage: %s [-d dir] [-x exclude] command\n";
+    struct wchopt* opt = malloc(sizeof(struct wchopt));
+    opt->wait = 1;
+    opt->once = 1;
+    opt->cmd = NULL;
+    opt->excludes = str_list_create();
+    opt->dir = ".";
 
-    while ((c = getopt(argc, argv, "d:x:")) != -1) {
+    int cmdsize;
+    struct str_node* fnode;
+    char* exclude;
+    int err;
+    int c;
+    static char usage[] = "Usage: %s [-01wW] [-d dir] [-x exclude] command\n\n"
+        "Options:\n"
+        "  -h           Show this help message\n"
+        "  -1           Run the command only once even if mulitple events occured at the same time. DEFAULT\n"
+        "  -0           Disalbe -1\n"
+        "  -w           Wait for the last command to exit. DEFAULT.\n"
+        "  -W           Do not wait the last command.\n"
+        "  -d=dir       Watch dir. DEFAULT is the current directory.\n"
+        "  -x=paths     Files and directories to ignore. You can specify multiple paths.\n";
+
+
+    while ((c = getopt(argc, argv, "h01wWd:x:")) != -1) {
         switch(c) {
+        case 'h':
+            fprintf(stderr, usage, argv[0]);
+            exit(1);
+        case '1':
+            opt->once = 1;
+            break;
+        case '0':
+            opt->once = 0;
+            break;
+        case 'w':
+            opt->wait = 1;
+            break;
+        case 'W':
+            opt->wait = 0;
+            break;
         case 'd':
-            dir = optarg;
+            opt->dir = strdup(optarg);
             break;
         case 'x':
             // capture mutliple arguments so that wildcard matching can be used
@@ -212,7 +298,7 @@ int main(int argc, char* argv[]) {
                     break;
                 }
                 exclude = normpath(argv[optind]);
-                str_list_append(excludes, exclude);
+                str_list_append(opt->excludes, exclude);
             }
             break;
         case '?':
@@ -226,16 +312,17 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
     if ((optind+1) > argc) {
-        fprintf(stderr, "%s: no command.\n", argv[0]);
         fprintf(stderr, usage, argv[0]);
         exit(1);
     }
 
-    if (optind < argc) {
-        for (; optind < argc; optind++) {
-            str_list_append(commands, argv[optind]);
-        }
+    cmdsize = argc - optind + 1; /* include the last NULL */
+    opt->cmd = malloc(cmdsize * sizeof(char*));
+    opt->cmd[cmdsize - 1] = NULL;
+    for (int i = 0; i < cmdsize - 1; i++) {
+        opt->cmd[i] = strdup(argv[optind]);
+        optind++;
     }
 
-    run(dir, excludes, commands);
+    run(opt);
 }
