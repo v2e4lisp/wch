@@ -17,7 +17,7 @@
  */
 
 struct wchopt {
-    int wait;
+    int wt;
     int once;
     char** cmd;
     char* dir;
@@ -43,7 +43,7 @@ void run(struct wchopt *opt);
 void walk(char* path, struct str_list* excludes, struct str_list* flist);
 int check(char* path, struct str_list* excludes);
 char* normpath(char* path);
-void onchange(char* file, char** cmd, int wait);
+void onchange(char* file, char** cmd, int wt);
 
 
 struct str_list* str_list_create() {
@@ -122,7 +122,7 @@ void walk(char* path, struct str_list* excludes, struct str_list* flist) {
 }
 
 void run(struct wchopt* opt) {
-    int wait = opt->wait;
+    int wt = opt->wt;
     int once = opt->once;
     char** cmd = opt->cmd;
     char* dir = opt->dir;
@@ -178,13 +178,13 @@ void run(struct wchopt* opt) {
         for (int i = 0; i < nev; i++) {
             if (events[i].fflags & NOTE_WRITE) {
                 char *fname = (char*) events[i].udata;
-                onchange(fname, cmd, wait);
+                onchange(fname, cmd, wt);
             }
         }
     }
 }
 
-void onchange(char* file, char** cmd, int wait) {
+void onchange(char* file, char** cmd, int wt) {
     /* char* file not in use */
     int pid;
     int ppid;
@@ -199,7 +199,7 @@ void onchange(char* file, char** cmd, int wait) {
         waitpid(pid, &status, WUNTRACED);
         return;
     }
-    if(wait) {                  /* child */
+    if(wt) {                  /* child */
         execvp(cmd[0], cmd);
     }
 
@@ -247,7 +247,7 @@ int main(int argc, char* argv[]) {
     extern int optind;
 
     struct wchopt* opt = malloc(sizeof(struct wchopt));
-    opt->wait = 1;
+    opt->wt = 1;
     opt->once = 1;
     opt->cmd = NULL;
     opt->excludes = str_list_create();
@@ -281,10 +281,10 @@ int main(int argc, char* argv[]) {
             opt->once = 0;
             break;
         case 'w':
-            opt->wait = 1;
+            opt->wt = 1;
             break;
         case 'W':
-            opt->wait = 0;
+            opt->wt = 0;
             break;
         case 'd':
             opt->dir = strdup(optarg);
