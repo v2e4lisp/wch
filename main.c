@@ -2,13 +2,15 @@
 #include <sys/dir.h>
 #include <sys/event.h>
 // #include <sys/resource.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <limits.h>
 
-#define PATH_MAX                 1024
+// #define PATH_MAX                 1024
 
 /* TODO:
  *   * print fd limits
@@ -22,6 +24,7 @@ struct wchopt {
     char** cmd;
     char* dir;
     struct str_list* excludes;
+    struct str_list* watchlist;
 };
 
 struct str_list {
@@ -36,8 +39,10 @@ struct str_node {
 };
 
 struct str_list* str_list_create();
-void str_list_append(struct str_list* slist, const char* p);
-void str_list_free(struct str_list* slist);
+void str_list_append(struct str_list* slist, char* p);
+void str_list_append_node(struct str_list* slist, struct str_node *node);
+void str_list_free(struct str_list* slist, int freestr);
+struct str_node* str_list_shift(struct str_list* slist);
 
 void run(struct wchopt *opt);
 void walk(char* path, struct str_list* excludes, struct str_list* flist);
@@ -54,9 +59,9 @@ struct str_list* str_list_create() {
     return slist;
 }
 
-void str_list_append(struct str_list* slist, const char* p) {
+void str_list_append(struct str_list* slist, char* p) {
     struct str_node* snode = malloc(sizeof(struct str_node));
-    snode->str = strdup(p);
+    snode->str = p;             /* do not alloc memory for str */
     snode->next = NULL;
     slist->size++;
 
@@ -69,11 +74,36 @@ void str_list_append(struct str_list* slist, const char* p) {
     }
 }
 
-void str_list_free(struct str_list *slist) {
+void str_list_append_node(struct str_list* slist, struct str_node *node) {
+    slist->tail->next = node;
+    slist->tail = node;
+    if (slist->tail) {
+        slist->tail->next = NULL;
+    }
+}
+
+
+struct str_node* str_list_shift(struct str_list* slist) {
+    struct str_node* head = slist->head;
+
+    if (!head) {
+        return NULL;
+    }
+    slist->head = head->next;
+    if (!slist->head) {
+        slist->tail = NULL;
+    }
+
+    return head;
+};
+
+void str_list_free(struct str_list *slist, int strfree) {
     struct str_node* snode = slist->head;
     while (snode) {
         struct str_node* next = snode->next;
-        free(snode->str);
+        if (strfree) {
+            free(snode->str);
+        }
         free(snode);
         snode = next;
     }
@@ -86,11 +116,12 @@ void walk(char* path, struct str_list* excludes, struct str_list* flist) {
     struct dirent * dent;
     int len;
     char newpath[PATH_MAX];
-    char* p;
 
     len = strlen(path);
     strcpy(newpath, path);
-    newpath[len++] = '/';
+    if (len != 1) {             /* root */
+        newpath[len++] = '/';
+    }
 
     dirp = opendir(path);
     if (dirp == NULL) {
@@ -103,38 +134,65 @@ void walk(char* path, struct str_list* excludes, struct str_list* flist) {
         if (!strcmp(dent->d_name, ".") || !strcmp(dent->d_name, "..")) {
             continue;
         }
-
         strncpy(newpath + len, dent->d_name, PATH_MAX - len);
-        p = normpath(newpath);
+        if (check(newpath, excludes) == 1) {
+            continue;
+        }
         if (dent->d_type == DT_DIR) {
-            if (check(p, excludes) == 0) {
-                walk(p, excludes, flist);
-            }
+            walk(strdup(newpath), excludes, flist);
         }
         if (dent->d_type == DT_REG) {
-            if (check(p, excludes) == 0) {
-                str_list_append(flist, p);
-            }
+            str_list_append(flist, strdup(newpath));
         }
     }
 
     closedir(dirp);
 }
 
+void load(struct str_list* watchlist,
+          struct str_list* excludes,
+          struct str_list* flist) {
+
+    struct stat fstat;
+    struct str_node* watch;
+
+    while ((watch = str_list_shift(watchlist))) {
+        if (-1 == lstat(watch->str, &fstat)) {
+            fprintf(stderr, "lstat error: %s\n", watch->str);
+            continue;
+        }
+        if (check(watch->str, excludes) == 1) {
+            continue;
+        }
+        if (S_ISREG(fstat.st_mode)) {
+            str_list_append_node(flist, watch);
+        }
+        if (S_ISDIR(fstat.st_mode)) {
+            walk(watch->str, excludes, flist);
+        }
+
+        fprintf(stderr, "only regular file can be watched: %s\n", watch->str);
+    }
+}
+
 void run(struct wchopt* opt) {
     int wt = opt->wt;
     int once = opt->once;
     char** cmd = opt->cmd;
-    char* dir = opt->dir;
+    // char* dir = opt->dir;
     struct str_list* excludes = opt->excludes;
+    struct str_list* watchlist = opt->watchlist;
 
     struct str_list* flist;
     struct str_node* fnode;
     int kq;                     /* kqueue */
     int nev;                    /* number of events */
     int fd;
+    int isdir = 0;
     flist = str_list_create();
-    walk(dir, excludes, flist);
+    load(watchlist, excludes, flist);
+    free(watchlist);
+    // walk(normpath(dir), excludes, flist);
     struct kevent events[flist->size];
     struct kevent changes[flist->size];
 
@@ -199,7 +257,7 @@ void onchange(char* file, char** cmd, int wt) {
         waitpid(pid, &status, WUNTRACED);
         return;
     }
-    if(wt) {                  /* child */
+    if(wt) {                    /* child */
         execvp(cmd[0], cmd);
     }
 
@@ -216,14 +274,14 @@ void onchange(char* file, char** cmd, int wt) {
 }
 
 char* normpath(char* path) {
-    int len = strlen(path);
-    if (path[len-1] == '/') {
-        path[len-1] = '\0';
+    char* real = malloc((PATH_MAX + 1)*sizeof(char));
+    char* ret = realpath(path, real);
+    if (ret) {
+        return real;
     }
-    if (strlen(path) > 2 && path[0] == '.' && path[1] == '/') {
-        path = path + 2;
-    }
-    return path;
+
+    fprintf(stderr, "Cannot find realpath: %s", path);
+    return NULL;
 }
 
 /**
@@ -251,24 +309,25 @@ int main(int argc, char* argv[]) {
     opt->once = 1;
     opt->cmd = NULL;
     opt->excludes = str_list_create();
-    opt->dir = ".";
+    opt->watchlist = str_list_create();
+    // opt->dir = ".";
 
     int cmdsize;
     struct str_node* fnode;
     char* exclude;
+    char* wf;
     int c;
-    static char usage[] = "Usage: %s [-01wW] [-d dir] [-x exclude] command\n\n"
+    static char usage[] = "Usage: %s [-01wW] [-f paths] [-x exclude] command\n\n"
         "Options:\n"
         "  -h           Show this help message\n"
         "  -1           Run the command only once even if mulitple events occured at the same time. DEFAULT\n"
         "  -0           Disalbe -1\n"
         "  -w           Wait for the last command to exit. DEFAULT.\n"
         "  -W           Do not wait the last command.\n"
-        "  -d=dir       Watch dir. DEFAULT is the current directory.\n"
-        "  -x=paths     Files and directories to ignore. You can specify multiple paths.\n";
+        "  -f=paths     Watch dir/file. DEFAULT is the current directory.\n"
+        "  -F=paths     Files and directories to ignore. You can specify multiple paths.\n";
 
-
-    while ((c = getopt(argc, argv, "h01wWd:x:")) != -1) {
+    while ((c = getopt(argc, argv, "h01wWf:F:")) != -1) {
         switch(c) {
         case 'h':
             fprintf(stderr, usage, argv[0]);
@@ -285,10 +344,19 @@ int main(int argc, char* argv[]) {
         case 'W':
             opt->wt = 0;
             break;
-        case 'd':
-            opt->dir = strdup(optarg);
+        case 'f':
+            optind--;           /* NOW argv[optind] == optarg */
+            for (; optind < argc; optind++) {
+                // current token is an option flag
+                if (argv[optind][0] == '-') {
+                    break;
+                }
+                if ((wf = normpath(argv[optind]))) {
+                    str_list_append(opt->watchlist, wf);
+                }
+            }
             break;
-        case 'x':
+        case 'F':
             // capture mutliple arguments so that wildcard matching can be used
             optind--;           /* NOW argv[optind] == optarg */
             for (; optind < argc; optind++) {
@@ -296,8 +364,9 @@ int main(int argc, char* argv[]) {
                 if (argv[optind][0] == '-') {
                     break;
                 }
-                exclude = normpath(argv[optind]);
-                str_list_append(opt->excludes, exclude);
+                if ((exclude = normpath(argv[optind]))) {
+                    str_list_append(opt->excludes, exclude);
+                }
             }
             break;
         case '?':
@@ -316,6 +385,10 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < cmdsize - 1; i++) {
         opt->cmd[i] = strdup(argv[optind]);
         optind++;
+    }
+
+    if (!opt->watchlist->head) {
+        str_list_append(opt->watchlist, normpath("."));
     }
 
     run(opt);
