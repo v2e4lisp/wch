@@ -75,13 +75,13 @@ void str_list_append(struct str_list* slist, char* p) {
 }
 
 void str_list_append_node(struct str_list* slist, struct str_node *node) {
+    slist->size++;
     slist->tail->next = node;
     slist->tail = node;
     if (slist->tail) {
         slist->tail->next = NULL;
     }
 }
-
 
 struct str_node* str_list_shift(struct str_list* slist) {
     struct str_node* head = slist->head;
@@ -324,8 +324,8 @@ int main(int argc, char* argv[]) {
         "  -0           Disalbe -1\n"
         "  -w           Wait for the last command to exit. DEFAULT.\n"
         "  -W           Do not wait the last command.\n"
-        "  -f=paths     Watch dir/file. DEFAULT is the current directory.\n"
-        "  -F=paths     Files and directories to ignore. You can specify multiple paths.\n";
+        "  -f=paths     Watch dirs and files. DEFAULT is the current directory.\n"
+        "  -F=paths     Files and directories to ignore.\n";
 
     while ((c = getopt(argc, argv, "h01wWf:F:")) != -1) {
         switch(c) {
@@ -387,7 +387,7 @@ int main(int argc, char* argv[]) {
         optind++;
     }
 
-    if (!opt->watchlist->head) {
+    if (opt->watchlist->size == 0) {
         str_list_append(opt->watchlist, normpath("."));
     }
 
